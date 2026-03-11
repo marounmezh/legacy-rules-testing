@@ -1,0 +1,164 @@
+USE DATABASE eds;
+USE SCHEMA sb_analytics;
+
+CREATE OR REPLACE TEMPORARY TABLE df_legacy_rules AS
+
+SELECT a.appl_key
+,a.appl_entry_dt
+,a.acct_key
+,a.new_money
+,a.offer_type
+
+--flag for bankruptcy (legacy rule 1): (maybe) RG > 10 and zero trades on bureau in the last 6 months, but how does bnkrpt play into this?
+,CASE 
+    WHEN ((es.PRI_INIT_RG_NO >=11 AND es.FNL_RSK_GRADE_NO = 20) AND (n1.all2000 = 0 OR n1.all2000 > 90)) 
+    OR (b1.subind IN ('S', 'J') AND n5.bnkrpt IN (13,14))
+    THEN 1
+    ELSE Null
+END AS inactive_legacy_flag1
+
+--flag for repossession (legacy rule 2): RG between 11 and 17 and have at least one repossession trade
+,CASE
+    WHEN es.PRI_INIT_RG_NO >= 11 AND es.PRI_INIT_RG_NO <= 17 AND es.FNL_RSK_GRADE_NO = 20 AND 0 < n1.all2830 <= 90
+    THEN 1
+    ELSE Null
+END AS repo_legacy_flag2
+
+--flag for charge off (legacy rule 3): Customers charge off with OMG between 61-84
+,CASE
+    WHEN es.PRI_INIT_RG_NO < 17 AND es.FNL_RSK_GRADE_NO = 17 AND o.WRST_EVR_24_MO = 'CO' AND o.MO_SNCE_WRST_EVR <= 84
+    THEN 1
+    ELSE Null
+END AS omf_co_legacy_flag3
+
+--flag for filing bankruptcy in the last year and CO amt greater than 20k or 5k (legacy rule 4): ??? 
+--I think we can remove the 20k restriction bc the 5k benchmark covers it
+,CASE 
+    WHEN es.PRI_INIT_RG_NO<=14 AND es.FNL_RSK_GRADE_NO = 15 AND ((n1.all9220 >= 0 and n1.all9220 <= 12) OR (n4.SL_CHGOF_AMT_OCT_12M>= 20000 AND n4.SL_CHGOF_AMT_OCT_12M<=999999990) OR (n4.SL_CHGOF_AMT_OCT_12M>= 5000 and n4.SL_CHGOF_AMT_OCT_12M<=999999990))
+    THEN 1
+    ELSE Null
+END AS recent_bankruptcy_legacy_flag4
+
+--flag for debt counseling program (legacy rule 5): RG <=14 and is enrolled in debt counseling or debt management program
+--according to notes, DSA flag should cover this section and could be removed, TBD
+,CASE
+    WHEN es.PRI_INIT_RG_NO <= 14 AND n4.SL_CONCOUN_ACTIVE = 1 AND (
+        (es.PRI_INIT_RG_NO <= 2 AND es.FNL_RSK_GRADE_NO = 3) OR
+        (es.PRI_INIT_RG_NO <= 4 AND es.FNL_RSK_GRADE_NO = 5) OR
+        (es.PRI_INIT_RG_NO <= 10 AND es.FNL_RSK_GRADE_NO = 11) OR
+        (es.PRI_INIT_RG_NO <= 14 AND es.FNL_RSK_GRADE_NO = 15)
+        )
+    THEN 1
+    ELSE Null
+END AS debt_counseling_legacy_flag5
+
+--flag for 60-180 days delinquent (legacy rule 6): RG <= 10 and delinquent 60-180 in the last 6 months
+,CASE 
+    WHEN es.PRI_INIT_RG_NO <= 10 AND es.FNL_RSK_GRADE_NO = 11 AND n4.SL_MTA0030 BETWEEN 0 AND 6
+    THEN 1
+    ELSE Null
+END AS dq_6mo_legacy_flag6
+
+-- total monthly payment on trades reported in the last 6 months (at least 3 trades) between 0 and 370 and income < 2800 (legacy rule 7): ???
+,CASE 
+    WHEN (n1.ALL0400 - n4.STU0416- n4.USE0416) > 2 AND (n1.ALL5830 >=0 AND n1.ALL5830 <=370) AND (a.P_INC_MTH_AM < 2800) AND (es.PRI_INIT_RG_NO+3 = es.FNL_RSK_GRADE_NO)
+    THEN 1
+    ELSE Null
+END AS payments_trades_legacy_flag7
+
+--charge off amounts in the last 12 months is more than $5000 (legacy rule 8): RG <= 10 and customers charge-off amount on bureau >= $5k
+,CASE
+    WHEN es.FNL_RSK_GRADE_NO <= 10 and (n4.SL_CHGOF_AMT_OCT_12M>= 5000 and n4.SL_CHGOF_AMT_OCT_12M<=999999990) AND (
+        (es.PRI_INIT_RG_NO <= 2 AND es.FNL_RSK_GRADE_NO = 3) OR
+        (es.PRI_INIT_RG_NO <= 4 AND es.FNL_RSK_GRADE_NO = 5) OR
+        (es.PRI_INIT_RG_NO <= 10 AND es.FNL_RSK_GRADE_NO = 11)
+    )
+    THEN 1
+    ELSE Null
+END AS co_over5k_12mo_legacy_flag8
+
+--no prequalified offer and source of lead in 30029 and 31090 (legacy rule 9): ???
+
+
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+FROM bdm.app_loan_production a
+
+--we will join the tables that have the variables we need to make our testing flags
+--from es table we need PRI_INIT_RG_NO and FNL_RSK_GRADE_NO
+left join (select * from (select appl_key as appl_key1
+                    ,row_number() over (partition by appl_key order by sc_ts asc) as row_num
+                    ,PRI_INIT_RG_NO
+                    ,FNL_RSK_GRADE_NO
+              from sa.rr_strgy_mstr 
+              where  date(sc_ts) >= '2018-01-01') as sm
+           where row_num = 1) as es
+           on a.appl_key = es.appl_key1
+
+--from b1 table we need subind, sunind, pri_cb_seq_no, cb_key. I will keep all the other variables for now too
+left join (select * from (select acap_refr_id
+                                 ,cb_key
+                                 ,exsubind
+                                 ,subind
+                                 ,max(keyhtnbr) over (partition by acap_refr_id order by reqts desc)::numeric as keyhtnbr
+                                 ,case when exsubind = 'J' then max(keyhtnbr) over (partition by acap_refr_id order by reqts desc)::numeric - 2
+                                       else max(keyhtnbr) over (partition by acap_refr_id order by reqts desc)::numeric
+                                  end as pri_cb_seq_no
+                                 ,case when exsubind = 'J' then max(keyhtnbr) over (partition by acap_refr_id order by reqts desc)::numeric - 1
+                                       when exsubind = 'S' then max(keyhtnbr) over (partition by acap_refr_id order by reqts desc)::numeric
+                                       else null
+                                  end as sec_cb_seq_no
+                ,max(rqhitnbr) over (partition by acap_refr_id order by reqts desc)::numeric as rqhitnbr 
+                ,max(reqts) over (partition by acap_refr_id order by reqts desc)::timestamp as reqts
+                ,row_number() over (partition by acap_refr_id order by reqts desc) as row_num
+                           from sa.rr_bl
+                           where date(reqts)::date >= '2019-01-01') as b
+           where row_num = 1) as b1
+           on a.acap_refr_id = b1.acap_refr_id  and a.acap_refr_id > 0 
+
+--from n1 table we need all2000, all2830, all9220, all0400, all5830 
+left join (select all2000
+            ,all2830
+            ,all9220
+            ,all0400
+            ,all5830
+            ,cb_key
+            ,cb_seq_no
+            from sa.cb_attr_atb_atb01 ) n1
+            on b1.cb_key = n1.cb_key
+            and b1.pri_cb_seq_no = n1.cb_seq_no
+            and b1.cb_key > 0
+            and b1.pri_cb_seq_no > 0  
+
+
+--N4 table
+left join (select * from sa.cb_attr_atb_atb04 ) n4
+           on b1.cb_key = n4.cb_key
+           and b1.pri_cb_seq_no = n4.cb_seq_no
+           and b1.cb_key > 0
+           and b1.pri_cb_seq_no > 0 
+
+--N5 table
+left join (select cb_key, cb_seq_no, totrd11, BNKRPT from sa.cb_xtnd_attr_crm 
+            where date(record_created_timestamp) >= '2019-01-01')  as n5
+            on b1.cb_key = n5.cb_key
+            and b1.sec_cb_seq_no = n5.cb_seq_no
+            and b1.cb_key > 0
+            and b1.sec_cb_seq_no > 0
+
+
+--Onus table
+left join (select appl_key
+            ,acct_key
+            ,WRST_EVR_24_MO
+            ,MO_SNCE_WRST_EVR
+            ,row_number() over (partition by appl_key order by sc_ts asc) as row_num
+            from sa.rr_strgy_onus
+            qualify row_num = 1) as o 
+            on a.appl_key = o.appl_key
+
+--one more for bp table TBD 
+
+
+WHERE a.appl_entry_dt BETWEEN '2026-01-01' AND '2026-03-01' and a.core_v_capp = 'Core' and a.cust_type in ('NC','FC');
