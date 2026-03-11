@@ -8,27 +8,28 @@ SELECT a.appl_key
 ,a.acct_key
 ,a.new_money
 ,a.offer_type
+,es.PRI_INIT_RG_NO
 
 --flag for bankruptcy (legacy rule 1): (maybe) RG > 10 and zero trades on bureau in the last 6 months, but how does bnkrpt play into this?
 ,CASE 
     WHEN ((es.PRI_INIT_RG_NO >=11 AND es.FNL_RSK_GRADE_NO = 20) AND (n1.all2000 = 0 OR n1.all2000 > 90)) 
     OR (b1.subind IN ('S', 'J') AND n5.bnkrpt IN (13,14))
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS inactive_legacy_flag1
 
 --flag for repossession (legacy rule 2): RG between 11 and 17 and have at least one repossession trade
 ,CASE
     WHEN es.PRI_INIT_RG_NO >= 11 AND es.PRI_INIT_RG_NO <= 17 AND es.FNL_RSK_GRADE_NO = 20 AND 0 < n1.all2830 <= 90
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS repo_legacy_flag2
 
---flag for charge off (legacy rule 3): Customers charge off with OMG between 61-84
+--flag for charge off (legacy rule 3): Customers charge off with OMF between 61-84
 ,CASE
     WHEN es.PRI_INIT_RG_NO < 17 AND es.FNL_RSK_GRADE_NO = 17 AND o.WRST_EVR_24_MO = 'CO' AND o.MO_SNCE_WRST_EVR <= 84
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS omf_co_legacy_flag3
 
 --flag for filing bankruptcy in the last year and CO amt greater than 20k or 5k (legacy rule 4): ??? 
@@ -36,7 +37,7 @@ END AS omf_co_legacy_flag3
 ,CASE 
     WHEN es.PRI_INIT_RG_NO<=14 AND es.FNL_RSK_GRADE_NO = 15 AND ((n1.all9220 >= 0 and n1.all9220 <= 12) OR (n4.SL_CHGOF_AMT_OCT_12M>= 20000 AND n4.SL_CHGOF_AMT_OCT_12M<=999999990) OR (n4.SL_CHGOF_AMT_OCT_12M>= 5000 and n4.SL_CHGOF_AMT_OCT_12M<=999999990))
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS recent_bankruptcy_legacy_flag4
 
 --flag for debt counseling program (legacy rule 5): RG <=14 and is enrolled in debt counseling or debt management program
@@ -49,21 +50,21 @@ END AS recent_bankruptcy_legacy_flag4
         (es.PRI_INIT_RG_NO <= 14 AND es.FNL_RSK_GRADE_NO = 15)
         )
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS debt_counseling_legacy_flag5
 
 --flag for 60-180 days delinquent (legacy rule 6): RG <= 10 and delinquent 60-180 in the last 6 months
 ,CASE 
     WHEN es.PRI_INIT_RG_NO <= 10 AND es.FNL_RSK_GRADE_NO = 11 AND n4.SL_MTA0030 BETWEEN 0 AND 6
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS dq_6mo_legacy_flag6
 
 -- total monthly payment on trades reported in the last 6 months (at least 3 trades) between 0 and 370 and income < 2800 (legacy rule 7): ???
 ,CASE 
     WHEN (n1.ALL0400 - n4.STU0416- n4.USE0416) > 2 AND (n1.ALL5830 >=0 AND n1.ALL5830 <=370) AND (a.P_INC_MTH_AM < 2800) AND (es.PRI_INIT_RG_NO+3 = es.FNL_RSK_GRADE_NO)
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS payments_trades_legacy_flag7
 
 --charge off amounts in the last 12 months is more than $5000 (legacy rule 8): RG <= 10 and customers charge-off amount on bureau >= $5k
@@ -74,7 +75,7 @@ END AS payments_trades_legacy_flag7
         (es.PRI_INIT_RG_NO <= 10 AND es.FNL_RSK_GRADE_NO = 11)
     )
     THEN 1
-    ELSE Null
+    ELSE 0
 END AS co_over5k_12mo_legacy_flag8
 
 --no prequalified offer and source of lead in 30029 and 31090 (legacy rule 9): ???
@@ -162,3 +163,133 @@ left join (select appl_key
 
 
 WHERE a.appl_entry_dt BETWEEN '2026-01-01' AND '2026-03-01' and a.core_v_capp = 'Core' and a.cust_type in ('NC','FC');
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+SELECT * FROM df_legacy_rules;
+-----------------------------------------------------------------------------------------------
+--the bottom chunk extracts the number of apps per rule as well as actual NM impact from them--
+-----------------------------------------------------------------------------------------------
+SELECT 
+inactive_legacy_flag1
+,repo_legacy_flag2
+,omf_co_legacy_flag3
+,recent_bankruptcy_legacy_flag4
+,debt_counseling_legacy_flag5
+,dq_6mo_legacy_flag6
+,payments_trades_legacy_flag7
+,co_over5k_12mo_legacy_flag8
+
+,CASE
+    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 = 0)
+    THEN 'Y'
+    ELSE 'N'
+END AS multiple_flags
+,COUNT(DISTINCT(appl_key)) as total_apps
+--the line below is a sanity check that all apps are unique
+--,COUNT(appl_key) as test_total_apps
+,COUNT(DISTINCT(appl_key))*6 as annual_total_apps
+,sum(case when acct_key > 0 then 1 else 0 end) as book
+,sum(case when acct_key > 0 then 1 else 0 end)*6 as annual_book
+,SUM(NEW_MONEY) AS actual_NM
+,SUM(NEW_MONEY)*6 AS annual_actual_NM
+
+FROM df_legacy_rules
+WHERE multiple_flags = 'N'
+GROUP BY 1,2,3,4,5,6,7,8,9;
+----------------------------------------------------------------------------------------------------
+/*the following chunk will simulated the NM impact if we were to relax the rules--
+We start by calculating the average new money and PTR of each initial risk grade to have a benchmark
+Then, we assigned the values based on initial risk grade to the data for all RGs. Then, we collapse
+and add by LEGACY FLAG and RG to get the simulated new money impact of deleting a rule*/
+----------------------------------------------------------------------------------------------------
+--NM and PTR by Initial RG
+SELECT PRI_INIT_RG_NO
+,SUM(NEW_MONEY) AS actual_NM
+,COUNT(DISTINCT(appl_key)) as total_apps
+,sum(case when acct_key > 0 then 1 else 0 end) as book
+,(book*100/total_apps) AS PTR
+,(actual_NM/book) AS average_NM
+FROM df_legacy_rules
+WHERE PRI_INIT_RG_NO NOT IN (0)
+GROUP BY 1
+ORDER BY PRI_INIT_RG_NO;
+
+--We copied the results to an excel sheet, now we hard code them into the final driver table. We can also copy these results from the resulting table from the chunk above. I hard coded them in for simplicity. The number I hard coded in is PTR times Average NM per twentile. Given that all our rows are unique (look at 188-189), summing them will give us the NM impact for each rule
+CREATE OR REPLACE TEMPORARY TABLE df_simulated_NM_impact AS
+
+SELECT 
+inactive_legacy_flag1
+,repo_legacy_flag2
+,omf_co_legacy_flag3
+,recent_bankruptcy_legacy_flag4
+,debt_counseling_legacy_flag5
+,dq_6mo_legacy_flag6
+,payments_trades_legacy_flag7
+,co_over5k_12mo_legacy_flag8
+
+,CASE
+    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 = 0)
+    THEN 'Y'
+    ELSE 'N'
+END AS multiple_flags
+,CASE
+    WHEN PRI_INIT_RG_NO = 1 THEN 3984.173
+    WHEN PRI_INIT_RG_NO = 2 THEN 3466.342
+    WHEN PRI_INIT_RG_NO = 3 THEN 2667.722
+    WHEN PRI_INIT_RG_NO = 4 THEN 2242.913
+    WHEN PRI_INIT_RG_NO = 5 THEN 1638.58
+    WHEN PRI_INIT_RG_NO = 6 THEN 1436.85
+    WHEN PRI_INIT_RG_NO = 7 THEN 1211.33
+    WHEN PRI_INIT_RG_NO = 8 THEN 1170.062
+    WHEN PRI_INIT_RG_NO = 9 THEN 1072.008
+    WHEN PRI_INIT_RG_NO = 10 THEN 1008.959
+    WHEN PRI_INIT_RG_NO = 11 THEN 766.7576
+    WHEN PRI_INIT_RG_NO = 12 THEN 686.0425
+    WHEN PRI_INIT_RG_NO = 13 THEN 621.2745
+    WHEN PRI_INIT_RG_NO = 14 THEN 555.23
+    WHEN PRI_INIT_RG_NO = 15 THEN 341.4836
+    WHEN PRI_INIT_RG_NO = 16 THEN 313.9799
+    WHEN PRI_INIT_RG_NO = 17 THEN 280.4509
+    WHEN PRI_INIT_RG_NO = 18 THEN 163.0912
+    WHEN PRI_INIT_RG_NO = 19 THEN 78.68024
+    WHEN PRI_INIT_RG_NO = 20 THEN 41.18349
+    ELSE 0
+END AS NM_times_PTR
+,appl_key
+,acct_key
+,new_money
+
+FROM df_legacy_rules;
+
+--sanity check
+SELECT * FROM df_simulated_nm_impact;
+
+--now we perform the calculations to get final new money impact
+SELECT
+inactive_legacy_flag1
+,repo_legacy_flag2
+,omf_co_legacy_flag3
+,recent_bankruptcy_legacy_flag4
+,debt_counseling_legacy_flag5
+,dq_6mo_legacy_flag6
+,payments_trades_legacy_flag7
+,co_over5k_12mo_legacy_flag8
+
+,CASE
+    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 = 0)
+    THEN 'Y'
+    ELSE 'N'
+END AS multiple_flags
+,COUNT(DISTINCT(appl_key)) as total_apps
+,COUNT(DISTINCT(appl_key))*6 as annual_total_apps
+,sum(case when acct_key > 0 then 1 else 0 end) as book
+,sum(case when acct_key > 0 then 1 else 0 end)*6 as annual_book
+,SUM(NEW_MONEY) AS actual_NM
+,SUM(NEW_MONEY)*6 AS annual_actual_NM
+,SUM(NM_times_PTR) AS simulated_NM
+,SUM(NM_times_PTR)*6 AS annual_simulated_NM
+,(ANNUAL_SIMULATED_NM - annual_actual_NM) AS difference
+
+FROM df_simulated_nm_impact
+WHERE multiple_flags = 'N'
+GROUP BY 1,2,3,4,5,6,7,8,9;
