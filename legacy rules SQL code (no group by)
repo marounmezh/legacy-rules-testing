@@ -35,7 +35,7 @@ END ::varchar(10) AS HML
 
 --flag for bankruptcy (legacy rule 1): (maybe) RG > 10 and zero trades on bureau in the last 6 months, but how does bnkrpt play into this?
 ,CASE 
-    WHEN ((es.PRI_INIT_RG_NO >=11 AND es.FNL_RSK_GRADE_NO = 20) AND (n1.all2000 = 0 OR n1.all2000 > 90)) 
+    WHEN ((es.PRI_INIT_RG_NO <=17 AND es.FNL_RSK_GRADE_NO = 20) AND (n1.all2000 = 0 OR n1.all2000 > 90)) 
     OR (b1.subind IN ('S', 'J') AND n5.bnkrpt IN (13,14))
     THEN 1
     ELSE 0
