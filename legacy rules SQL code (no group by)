@@ -9,6 +9,29 @@ SELECT a.appl_key
 ,a.new_money
 ,a.offer_type
 ,es.PRI_INIT_RG_NO
+,ct2.tst_ctl_19_cd
+,sm2.SPCL_TRTMNT_CD
+,sm2.SCORE_SGMTTN_TX
+,CASE 
+    WHEN a.channel IN ('Branch') THEN 'NonAff'
+    WHEN a.iaps_src_cd IN ('31367','31509','90078','31351','31369','31470','90025','31295','31349','31336','31436') THEN 'Aff2'
+    WHEN a.channel IN ('Internet: Affiliate') THEN 'Aff1'
+    ELSE 'NonAff'
+END :: varchar(8) AS credit_box
+,CASE 
+    WHEN a.p_adr_st IN ('CO','NE','MN','MD','ME','WY','NY','PA') THEN 'L'
+    WHEN a.p_adr_st IN ('WV','WA','MI','OH','TX','NJ','LA','HI') THEN 'ML'
+    WHEN a.p_adr_st IN ('MS','NC','IA','KY','IN','NV','UT','AZ') THEN 'MH'
+    ELSE 'UH' 
+END ::varchar(10) AS HML
+,a.iaps_src_cd
+
+--flag to identify which apps got scored with ENS 2 and which ones got scored with ENS 3
+,CASE
+    WHEN tst_ctl_19_cd = 'E2' OR score_sgmttn_tx IN ('LBEP', 'DMPQES') THEN 'Ens 2'
+    WHEN tst_ctl_19_cd = 'E3' OR score_sgmttn_tx = 'LBEA' THEN 'Ens 3'
+    ELSE 'Error'
+    END ::varchar(10) AS scoring_model
 
 --flag for bankruptcy (legacy rule 1): (maybe) RG > 10 and zero trades on bureau in the last 6 months, but how does bnkrpt play into this?
 ,CASE 
@@ -35,10 +58,16 @@ END AS omf_co_legacy_flag3
 --flag for filing bankruptcy in the last year and CO amt greater than 20k or 5k (legacy rule 4): ??? 
 --I think we can remove the 20k restriction bc the 5k benchmark covers it
 ,CASE 
-    WHEN es.PRI_INIT_RG_NO<=14 AND es.FNL_RSK_GRADE_NO = 15 AND ((n1.all9220 >= 0 and n1.all9220 <= 12) OR (n4.SL_CHGOF_AMT_OCT_12M>= 20000 AND n4.SL_CHGOF_AMT_OCT_12M<=999999990) OR (n4.SL_CHGOF_AMT_OCT_12M>= 5000 and n4.SL_CHGOF_AMT_OCT_12M<=999999990))
+    WHEN es.PRI_INIT_RG_NO<=14 AND es.FNL_RSK_GRADE_NO = 15 AND n1.all9220 >= 0 AND n1.all9220 <= 12 AND ((n4.SL_CHGOF_AMT_OCT_12M>= 20000 AND n4.SL_CHGOF_AMT_OCT_12M<=999999990) OR (n4.SL_CHGOF_AMT_OCT_12M>= 5000 and n4.SL_CHGOF_AMT_OCT_12M<=999999990))
     THEN 1
     ELSE 0
 END AS recent_bankruptcy_legacy_flag4
+
+--testing out new logic
+,CASE 
+    WHEN n1.all9220 >= 0 AND n1.all9220 <= 12 AND n1.all5301 >= 5000 AND n1.all5301 <= 999999990 and es.PRI_INIT_RG_NO<=14 AND es.FNL_RSK_GRADE_NO = 15 AND n1.all8164 >= 0 AND n1.all8164 <= 12 THEN 1
+    ELSE 0
+END AS flag4_test
 
 --flag for debt counseling program (legacy rule 5): RG <=14 and is enrolled in debt counseling or debt management program
 --according to notes, DSA flag should cover this section and could be removed, TBD
@@ -60,9 +89,16 @@ END AS debt_counseling_legacy_flag5
     ELSE 0
 END AS dq_6mo_legacy_flag6
 
+--test bureau flag 6
+,CASE
+    WHEN n3.mta2356 > 0 AND n3.mta2356 <= 90 AND es.PRI_INIT_RG_NO <= 10 AND es.FNL_RSK_GRADE_NO = 11 
+    THEN 1
+    ELSE 0
+END AS flag6_test
+
 -- total monthly payment on trades reported in the last 6 months (at least 3 trades) between 0 and 370 and income < 2800 (legacy rule 7): ???
 ,CASE 
-    WHEN (n1.ALL0400 - n4.STU0416- n4.USE0416) > 2 AND (n1.ALL5830 >=0 AND n1.ALL5830 <=370) AND (a.P_INC_MTH_AM < 2800) AND (es.PRI_INIT_RG_NO+3 = es.FNL_RSK_GRADE_NO)
+   WHEN (n1.ALL0400 - n4.STU0416- n4.USE0416) > 2 AND (n1.ALL5830 >=0 AND n1.ALL5830 <=370) AND (a.P_INC_MTH_AM < 2800) AND (es.PRI_INIT_RG_NO+3 = es.FNL_RSK_GRADE_NO)
     THEN 1
     ELSE 0
 END AS payments_trades_legacy_flag7
@@ -80,7 +116,7 @@ END AS co_over5k_12mo_legacy_flag8
 
 --no prequalified offer and source of lead in 30029 and 31090 (legacy rule 9): ???
 
-
+,CASE WHEN a.iaps_src_cd IN ('30029', '31090') THEN 1 ELSE 0 END AS legacy_rule9
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -124,6 +160,8 @@ left join (select all2000
             ,all9220
             ,all0400
             ,all5830
+            ,all5301
+            ,all8164
             ,cb_key
             ,cb_seq_no
             from sa.cb_attr_atb_atb01 ) n1
@@ -131,6 +169,16 @@ left join (select all2000
             and b1.pri_cb_seq_no = n1.cb_seq_no
             and b1.cb_key > 0
             and b1.pri_cb_seq_no > 0  
+
+--join mta 2356 from n3
+left join (select mta2356
+            ,cb_key
+            ,cb_seq_no
+            from sa.cb_attr_atb_atb03 ) n3
+            on b1.cb_key = n3.cb_key
+            and b1.pri_cb_seq_no = n3.cb_seq_no
+            and b1.cb_key > 0
+            and b1.pri_cb_seq_no > 0
 
 
 --N4 table
@@ -159,124 +207,352 @@ left join (select appl_key
             qualify row_num = 1) as o 
             on a.appl_key = o.appl_key
 
---one more for bp table TBD 
 
+--join rr_stgy_chcl_cntl to get tst_ctl_19_cd
+left join (select * 
+            from (select  appl_key
+                         ,tst_ctl_19_cd
+                         ,row_number() over(partition by appl_key order by sc_ts desc) as row_num
+                  from q1.rr_strgy_chcl_cntl
+                  where sc_ts::date >='2026-02-09' :: date - 30 and G4_REC_TYP = 1
+                  qualify row_num = 1) as a
+) as ct2 on a.appl_key = ct2.appl_key
 
-WHERE a.appl_entry_dt BETWEEN '2026-01-01' AND '2026-03-01' and a.core_v_capp = 'Core' and a.cust_type in ('NC','FC');
-------------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------------
+--join rr_stgy_mstr to get special treatment code
+	left join
+		(select * from (select appl_key
+			,max(sc_ts) over (partition by appl_key order by sc_ts asc) as sc_ts
+			,row_number() over (partition by appl_key order by sc_ts asc) as row_num
+            ,SPCL_TRTMNT_CD
+            ,score_sgmttn_tx
+		from sa.rr_strgy_mstr
+		where date(sc_ts) >= '2022-07-01' :: date - 40) as sm
+		where row_num = 1) as sm2
+	on a.appl_key = sm2.appl_key
+
+WHERE  a.appl_entry_dt >= '2026-01-01' AND a.appl_entry_dt < '2026-03-01' and a.core_v_capp = 'Core' and a.cust_type in ('NC','FC');
+-----------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------
 SELECT * FROM df_legacy_rules;
 -----------------------------------------------------------------------------------------------
---the bottom chunk extracts the number of apps per rule as well as actual NM impact from them--
+                --testing out that the test flags work as expected--
 -----------------------------------------------------------------------------------------------
-SELECT 
-inactive_legacy_flag1
+SELECT appl_entry_dt
+,SUM(recent_bankruptcy_legacy_flag4)
+,SUM(flag4_test)
+,SUM(dq_6mo_legacy_flag6)
+,SUM(flag6_test)
+
+FROM df_legacy_rules
+GROUP BY 1;
+----------------------------------------------------------------------------------------------------
+/*the following chunk will simulated the NM impact if we were to relax the rules--
+We start by calculating the average new money and PTR of each initial offer type to have a benchmark
+Then, we assigned the values based on initial offer type to the data for all. Then, we collapse
+and add by LEGACY FLAG to get the simulated new money impact of deleting a rule. For this, we need
+to simulate the credit box based on initial risk grade*/
+----------------------------------------------------------------------------------------------------
+--Pull the # of apps, booked, and new money based on everyone's initial offer type and simulated credit box
+CREATE OR REPLACE TEMPORARY TABLE df_simulated_credit_boxes AS
+SELECT
+CASE 
+      WHEN credit_box = 'NonAff' THEN
+          CASE
+              WHEN HML = 'UH' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3,4,5) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (6,7,8,9,10) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (11,12,13,14,15,16,17,18) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'MH' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3,4,5) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (6,7,8,9) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (10,11,12,13,14,15,16,17,18) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'ML' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3,4) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (5,6,7) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'L' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (3) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (4,5,6,7,8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+          END
+      WHEN credit_box = 'Aff1' THEN
+          CASE
+              WHEN HML = 'UH' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (7,8,9,10) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (11,12,13,14,15,16,17,18) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'MH' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (7,8) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (9,10,11,12,13,14,15,16,17,18) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'ML' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (4,5,6,7) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'L' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2,3) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (4,5,6,7,8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+          END
+      WHEN credit_box = 'Aff2' THEN
+          CASE
+              WHEN HML = 'UH' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (3,4,5,6) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (7,8,9,10,11,12,13,14,15,16,17,18) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'MH' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1,2) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (3,4,5) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (6,7,8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'ML' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (2) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (3,4,5,6,7,8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+              WHEN HML = 'L' THEN
+                  CASE
+                      WHEN PRI_INIT_RG_NO IN (1) THEN 'MO'
+                      WHEN PRI_INIT_RG_NO IN (2) THEN 'SDL'
+                      WHEN PRI_INIT_RG_NO IN (3,4,5,6,7,8,9,10,11,12,13,14,15,16,17) THEN 'SO'
+                      WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+                  END
+          END
+      ELSE 'Error'
+  END AS CB_2025_08_ENS3_PRODUCT_OFFER --Ensemble 3.0 strategy
+
+, CB_2025_08_ENS3_PRODUCT_OFFER AS CURRENT_CB_ENS3_PRODUCT_OFFER
+
+, CASE 
+      WHEN HML = 'UH' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (7,8,9,10,11,12) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (13,14,15,16,17,18) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+          END
+      WHEN HML = 'MH' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (6,7,8,9,10,11,12) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (13,14,15,16,17,18) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+          END
+      WHEN HML = 'ML' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (5,6,7,8,9,10,11,12) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (13,14,15,16,17) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+          END
+      WHEN HML = 'L' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (5,6,7,8,9,10,11,12) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (13,14,15,16,17) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+          END
+      ELSE 'Error'
+  END AS CB_2025_08_BRIGHTWAY_PRODUCT_OFFER
+
+, CB_2025_08_BRIGHTWAY_PRODUCT_OFFER AS CURRENT_CB_BRIGHTWAY_PRODUCT_OFFER
+
+, CASE 
+      WHEN HML = 'UH' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (7,8,9,10,11,12,13,14) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (15,16,17,18) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+          END
+      WHEN HML = 'MH' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (7,8,9,10,11,12,13,14) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (15,16,17,18) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (19,20) THEN 'DECLINE'
+          END
+      WHEN HML = 'ML' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (4,5,6,7,8,9,10,11,12,13,14) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (15,16,17) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+          END
+      WHEN HML = 'L' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (4,5,6,7,8,9,10,11,12,13,14) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (15,16,17) THEN 'SO'
+              WHEN PRI_INIT_RG_NO IN (18,19,20) THEN 'DECLINE'
+          END
+      ELSE 'Error'
+  END AS CB_2025_08_LIGHTBOX_PRODUCT_OFFER
+
+, CB_2025_08_LIGHTBOX_PRODUCT_OFFER AS CURRENT_CB_LIGHTBOX
+
+, CASE 
+      WHEN HML = 'UH' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (7,8,9,10) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (11,12,13,14,15,16,17,18,19,20) THEN 'SO'
+          END
+      WHEN HML = 'MH' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5,6) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (7,8) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (9,10,11,12,13,14,15,16,17,18,19,20) THEN 'SO'
+          END
+      WHEN HML = 'ML' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3,4,5) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (6,7) THEN 'SDL'
+              WHEN PRI_INIT_RG_NO IN (8,9,10,11,12,13,14,15,16,17,18,19,20) THEN 'SO'
+          END
+      WHEN HML = 'L' THEN
+          CASE
+              WHEN PRI_INIT_RG_NO IN (1,2,3) THEN 'MO'
+              WHEN PRI_INIT_RG_NO IN (4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20) THEN 'SO'
+          END
+      ELSE 'Error'
+  END AS CB_2025_08_LIGHTBOX_EXPANDED_PRODUCT_OFFER
+
+, CB_2025_08_LIGHTBOX_EXPANDED_PRODUCT_OFFER AS CURRENT_CB_LIGHTBOX_EXPANDED
+
+, CASE 
+      WHEN iaps_src_cd NOT IN ('31514') THEN
+          CASE
+              WHEN iaps_src_cd IN ('31507') THEN CURRENT_CB_BRIGHTWAY_PRODUCT_OFFER 
+              WHEN PRI_INIT_RG_NO < 17 THEN CURRENT_CB_LIGHTBOX
+              WHEN spcl_trtmnt_cd = 'O6' THEN CURRENT_CB_LIGHTBOX_EXPANDED
+              ELSE CURRENT_CB_ENS3_PRODUCT_OFFER
+          END
+      WHEN tst_ctl_19_cd IN ('E3') THEN CURRENT_CB_ENS3_PRODUCT_OFFER
+      ELSE CURRENT_CB_ENS3_PRODUCT_OFFER
+  END AS CURRENT_CB_PRODUCT_OFFER
+
+,new_money
+,appl_key
+,acct_key
+,appl_entry_dt
+,inactive_legacy_flag1
 ,repo_legacy_flag2
 ,omf_co_legacy_flag3
 ,recent_bankruptcy_legacy_flag4
+,flag4_test
 ,debt_counseling_legacy_flag5
 ,dq_6mo_legacy_flag6
+,flag6_test
 ,payments_trades_legacy_flag7
 ,co_over5k_12mo_legacy_flag8
+,legacy_rule9
+,PRI_INIT_RG_NO
+,scoring_model
 
-,CASE
-    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 = 0)
-    THEN 'Y'
-    ELSE 'N'
-END AS multiple_flags
-,COUNT(DISTINCT(appl_key)) as total_apps
---the line below is a sanity check that all apps are unique
---,COUNT(appl_key) as test_total_apps
-,COUNT(DISTINCT(appl_key))*6 as annual_total_apps
-,sum(case when acct_key > 0 then 1 else 0 end) as book
-,sum(case when acct_key > 0 then 1 else 0 end)*6 as annual_book
-,SUM(NEW_MONEY) AS actual_NM
-,SUM(NEW_MONEY)*6 AS annual_actual_NM
+FROM df_legacy_rules;
 
-FROM df_legacy_rules
-WHERE multiple_flags = 'N'
-GROUP BY 1,2,3,4,5,6,7,8,9;
-----------------------------------------------------------------------------------------------------
-/*the following chunk will simulated the NM impact if we were to relax the rules--
-We start by calculating the average new money and PTR of each initial risk grade to have a benchmark
-Then, we assigned the values based on initial risk grade to the data for all RGs. Then, we collapse
-and add by LEGACY FLAG and RG to get the simulated new money impact of deleting a rule*/
-----------------------------------------------------------------------------------------------------
---NM and PTR by Initial RG
-SELECT PRI_INIT_RG_NO
-,SUM(NEW_MONEY) AS actual_NM
+---------------------------------------------------------------------
+--ABOVE GETS US THE NUMBERS FOR ALL. BELOW AGGREGATES BY OFFER TYPE--
+---------------------------------------------------------------------
+SELECT
+CURRENT_CB_PRODUCT_OFFER
+,sum(NEW_MONEY) AS actual_NM
 ,COUNT(DISTINCT(appl_key)) as total_apps
 ,sum(case when acct_key > 0 then 1 else 0 end) as book
 ,(book*100/total_apps) AS PTR
 ,(actual_NM/book) AS average_NM
-FROM df_legacy_rules
-WHERE PRI_INIT_RG_NO NOT IN (0)
-GROUP BY 1
-ORDER BY PRI_INIT_RG_NO;
-
---We copied the results to an excel sheet, now we hard code them into the final driver table. We can also copy these results from the resulting table from the chunk above. I hard coded them in for simplicity. The number I hard coded in is PTR times Average NM per twentile. Given that all our rows are unique (look at 188-189), summing them will give us the NM impact for each rule
+FROM df_simulated_credit_boxes
+GROUP BY 1;
+-------------------------------------------------------------------------------------------------------------------------
+--We copied the results to an excel sheet, now we hard code them into the final driver table. We can also copy these results from the resulting table from the chunk above. 
+--I hard coded them in for simplicity. The number I hard coded in is PTR times Average NM per simulated offer type. 
+--Given that our rows are unique, summing them will give us the NM impact for each rule
+-------------------------------------------------------------------------------------------------------------------------
 CREATE OR REPLACE TEMPORARY TABLE df_simulated_NM_impact AS
 
 SELECT 
-inactive_legacy_flag1
+appl_entry_dt
+,inactive_legacy_flag1
 ,repo_legacy_flag2
 ,omf_co_legacy_flag3
 ,recent_bankruptcy_legacy_flag4
+,flag4_test
 ,debt_counseling_legacy_flag5
 ,dq_6mo_legacy_flag6
+,flag6_test
 ,payments_trades_legacy_flag7
 ,co_over5k_12mo_legacy_flag8
+,legacy_rule9
+,CURRENT_CB_PRODUCT_OFFER
+,PRI_INIT_RG_NO
+,scoring_model
 
 ,CASE
-    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 = 0)
+    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 + legacy_rule9 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 + legacy_rule9 = 0)
     THEN 'Y'
     ELSE 'N'
 END AS multiple_flags
 ,CASE
-    WHEN PRI_INIT_RG_NO = 1 THEN 3984.173
-    WHEN PRI_INIT_RG_NO = 2 THEN 3466.342
-    WHEN PRI_INIT_RG_NO = 3 THEN 2667.722
-    WHEN PRI_INIT_RG_NO = 4 THEN 2242.913
-    WHEN PRI_INIT_RG_NO = 5 THEN 1638.58
-    WHEN PRI_INIT_RG_NO = 6 THEN 1436.85
-    WHEN PRI_INIT_RG_NO = 7 THEN 1211.33
-    WHEN PRI_INIT_RG_NO = 8 THEN 1170.062
-    WHEN PRI_INIT_RG_NO = 9 THEN 1072.008
-    WHEN PRI_INIT_RG_NO = 10 THEN 1008.959
-    WHEN PRI_INIT_RG_NO = 11 THEN 766.7576
-    WHEN PRI_INIT_RG_NO = 12 THEN 686.0425
-    WHEN PRI_INIT_RG_NO = 13 THEN 621.2745
-    WHEN PRI_INIT_RG_NO = 14 THEN 555.23
-    WHEN PRI_INIT_RG_NO = 15 THEN 341.4836
-    WHEN PRI_INIT_RG_NO = 16 THEN 313.9799
-    WHEN PRI_INIT_RG_NO = 17 THEN 280.4509
-    WHEN PRI_INIT_RG_NO = 18 THEN 163.0912
-    WHEN PRI_INIT_RG_NO = 19 THEN 78.68024
-    WHEN PRI_INIT_RG_NO = 20 THEN 41.18349
-    ELSE 0
+    WHEN CURRENT_CB_PRODUCT_OFFER IN('MO') THEN 2916.048
+    WHEN CURRENT_CB_PRODUCT_OFFER IN ('SDL') THEN 904.6215
+    WHEN CURRENT_CB_PRODUCT_OFFER IN ('SO') THEN 292.7765
 END AS NM_times_PTR
 ,appl_key
 ,acct_key
 ,new_money
 
-FROM df_legacy_rules;
+FROM df_simulated_credit_boxes;
 
---sanity check
-SELECT * FROM df_simulated_nm_impact;
-
---now we perform the calculations to get final new money impact
 SELECT
-inactive_legacy_flag1
+CONCAT(YEAR(appl_entry_dt),'_M',MONTH(appl_entry_dt)) AS app_month
+,CURRENT_CB_PRODUCT_OFFER
+,PRI_INIT_RG_NO
+,scoring_model
+,inactive_legacy_flag1
 ,repo_legacy_flag2
 ,omf_co_legacy_flag3
 ,recent_bankruptcy_legacy_flag4
+,flag4_test
 ,debt_counseling_legacy_flag5
 ,dq_6mo_legacy_flag6
+,flag6_test
 ,payments_trades_legacy_flag7
 ,co_over5k_12mo_legacy_flag8
+,legacy_rule9
 
 ,CASE
-    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 = 0)
+    WHEN (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 + legacy_rule9 > 1) OR (inactive_legacy_flag1 + repo_legacy_flag2 + omf_co_legacy_flag3 + recent_bankruptcy_legacy_flag4 + debt_counseling_legacy_flag5 + dq_6mo_legacy_flag6 + payments_trades_legacy_flag7 + co_over5k_12mo_legacy_flag8 + legacy_rule9 = 0)
     THEN 'Y'
     ELSE 'N'
 END AS multiple_flags
@@ -288,8 +564,6 @@ END AS multiple_flags
 ,SUM(NEW_MONEY)*6 AS annual_actual_NM
 ,SUM(NM_times_PTR) AS simulated_NM
 ,SUM(NM_times_PTR)*6 AS annual_simulated_NM
-,(ANNUAL_SIMULATED_NM - annual_actual_NM) AS difference
 
 FROM df_simulated_nm_impact
-WHERE multiple_flags = 'N'
-GROUP BY 1,2,3,4,5,6,7,8,9;
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16;
